@@ -593,8 +593,8 @@ program
         type: orderData.ask_currency.type === 'Token' ? 'TokenV1' : 'Coin',
         ...(orderData.ask_currency.type === 'Token' ? {token_id: orderData.ask_currency.token_id} : {}),
         amount: {
-          atoms: orderData.ask_balance.atoms - orderData.initially_asked.atoms,
-          decimal: orderData.ask_balance.decimal - orderData.initially_asked.decimal,
+          atoms: (orderData.ask_balance.atoms - orderData.initially_asked.atoms).toString(),
+          decimal: (orderData.ask_balance.decimal - orderData.initially_asked.decimal).toString(),
         },
       },
       destination: orderData.conclude_destination,
@@ -848,7 +848,7 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
     );
   });
 
-  const inputsArray = [...inputsIds,...inputCommands];
+  const inputsArray = [...inputCommands, ...inputsIds];
 
   const outputsArrayItems = transactionJSONrepresentation.outputs.map((output) => {
     if (output.type === 'Transfer') {
@@ -898,12 +898,8 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
   const network = NETWORKS['testnet'];
 
   const optUtxos_ = transactionJSONrepresentation.inputs.map((input) => {
-    if (input.type === 'ConcludeOrder') {
-      return encode_input_for_conclude_order(
-        input.order_id,
-        input.nonce.toString(),
-        network,
-      );
+    if (!input.utxo) {
+      return 0;
     }
     if (input.utxo.type === 'Transfer') {
       return getOutputs({
@@ -926,17 +922,19 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
   });
 
 
-  const optUtxos = []
+  const optUtxos = [];
   for (let i = 0; i < optUtxos_.length; i++) {
     if(transactionJSONrepresentation.inputs[i].type === 'ConcludeOrder') {
       optUtxos.push(0);
       continue;
     } else {
-      optUtxos.push(1)
-      optUtxos.push(...optUtxos_[i])
+      optUtxos.push(1);
+      optUtxos.push(...optUtxos_[i]);
       continue;
     }
   }
+
+  console.log('optUtxos', optUtxos);
 
   const encodedWitnesses = transactionJSONrepresentation.inputs.map((input, index) => {
     const address = input?.utxo?.destination || input.destination;
