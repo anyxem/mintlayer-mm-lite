@@ -593,8 +593,8 @@ program
         type: orderData.ask_currency.type === 'Token' ? 'TokenV1' : 'Coin',
         ...(orderData.ask_currency.type === 'Token' ? {token_id: orderData.ask_currency.token_id} : {}),
         amount: {
-          atoms: orderData.ask_balance.atoms,
-          decimal: orderData.ask_balance.decimal,
+          atoms: orderData.ask_balance.atoms - orderData.initially_asked.atoms,
+          decimal: orderData.ask_balance.decimal - orderData.initially_asked.decimal,
         },
       },
       destination: orderData.conclude_destination,
@@ -602,7 +602,7 @@ program
 
 
     const amountCoin = 0n;
-    const fee = BigInt(0.5 * Math.pow(10, 11)); // TODO
+    const fee = BigInt(1 * Math.pow(10, 11)); // TODO
 
     const pickCoin = amountCoin + fee; // TODO more precise pick
     const inputObjCoin = selectUTXOs(utxos, pickCoin, 'Transfer', null);
@@ -839,7 +839,16 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
     index: transaction.index,
   }));
   const inputsIds = outpointedSourceIds.map((source) => (encode_input_for_utxo(source.source_id, source.index)));
-  const inputsArray = inputsIds;
+
+  const inputCommands = transactionJSONrepresentation.inputs.filter((input) => input.type === 'ConcludeOrder').map((input) => {
+    return encode_input_for_conclude_order(
+      input.order_id,
+      input.nonce.toString(),
+      network,
+    );
+  });
+
+  const inputsArray = [...inputsIds,...inputCommands];
 
   const outputsArrayItems = transactionJSONrepresentation.outputs.map((output) => {
     if (output.type === 'Transfer') {
@@ -932,14 +941,9 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
   const encodedWitnesses = transactionJSONrepresentation.inputs.map((input, index) => {
     const address = input?.utxo?.destination || input.destination;
     const addressPrivateKey = addressesPrivateKeys[address];
+    console.log('address', address);
+    console.log('addressPrivateKey', addressPrivateKey);
     try {
-      console.log(SignatureHashType.ALL,
-        addressPrivateKey,
-        address,
-        transaction,
-        optUtxos,
-        index,
-        network,);
       encode_witness(
         SignatureHashType.ALL,
         addressPrivateKey,
@@ -950,6 +954,7 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
         network,
       )
     } catch (e) {
+      console.log('Error witness');
       console.log(e); // TODO error here Invalid Transaction witness encoding
     }
     const witness = encode_witness(
