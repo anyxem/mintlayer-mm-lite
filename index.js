@@ -379,9 +379,6 @@ program
           "decimal": give_amount
         },
       }
-      // encode_create_order_output(
-      //   ask_amount, ask_token_id, give_amount, give_token_id, conclude_address, network
-      // )
     ];
 
     // step 2. Determine inputs
@@ -448,11 +445,7 @@ program
       outputs: outputObj,
     }
 
-    console.log("transactionJSONrepresentation:", JSON.stringify(transactionJSONrepresentation, null, 2));
-
     const transactionBINrepresentation = getTransactionBINrepresentation(transactionJSONrepresentation);
-
-    console.log("transactionBINrepresentation:", transactionBINrepresentation);
 
     const transactionHex = getTransactionHEX({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys});
 
@@ -462,7 +455,7 @@ program
     const broadcast = await promptUser('Do you want to broadcast this to the network using API server? (Y/n): ');
     if (broadcast.toLowerCase() === 'y') {
       // Placeholder for API broadcast (adjust endpoint and payload as needed)
-      const broadcastResponse = await fetch(WALLET_API + '/transaction', {
+      const broadcastResponse = await fetch( 'https://api-server-lovelace.mintlayer.org/api/v2/transaction', {
         method: 'POST',
         headers: {
           'Content-Type': 'text/plain'
@@ -596,16 +589,6 @@ const getOutputs = ({
     const amountInstace = Amount.from_atoms(amount);
     return encode_output_delegate_staking(amountInstace, delegation_id, networkIndex)
   }
-  // if (type === 'spendFromDelegation') {
-  //   const stakingMaturity = getStakingMaturity(chainTip, networkType)
-  //   const encodedLockForBlock = encode_lock_for_block_count(stakingMaturity)
-  //   return encode_output_lock_then_transfer(
-  //     amountInstace,
-  //     address,
-  //     encodedLockForBlock,
-  //     networkIndex,
-  //   )
-  // }
 }
 
 const selectUTXOs = (utxos, amount, outputType, token_id) => {
@@ -658,24 +641,19 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
   // Binarisation
   // calculate fee and prepare as much transaction as possible
   const inputs = transactionJSONrepresentation.inputs;
-  console.log('inputs', inputs);
   const transactionStrings = inputs.map((input) => ({
     transaction: input.outpoint.source_id,
     index: input.outpoint.index,
   }));
-  console.log('transactionStrings', transactionStrings);
   const transactionBytes = transactionStrings.map((transaction) => ({
     bytes: Buffer.from(transaction.transaction, 'hex'),
     index: transaction.index,
   }));
-  console.log('transactionBytes', transactionBytes);
   const outpointedSourceIds = transactionBytes.map((transaction) => ({
     source_id: encode_outpoint_source_id(transaction.bytes, SourceId.Transaction),
     index: transaction.index,
   }));
-  console.log('outpointedSourceIds', outpointedSourceIds);
   const inputsIds = outpointedSourceIds.map((source) => (encode_input_for_utxo(source.source_id, source.index)));
-  console.log('inputsIds', inputsIds);
   const inputsArray = inputsIds;
 
   const outputsArrayItems = transactionJSONrepresentation.outputs.map((output) => {
@@ -688,19 +666,6 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
       })
     }
     if (output.type === 'CreateOrder') {
-      try{
-        console.log('output.conclude_destination', output.conclude_destination);
-        encode_create_order_output(
-          Amount.from_atoms(output.ask_balance.atoms.toString()), //ask_amount
-          output.ask_currency.token_id || null,  // ask_token_id
-          Amount.from_atoms(output.give_balance.atoms.toString()), //give_amount
-          output.give_currency.token_id || null, //give_token_id
-          output.conclude_destination, // conclude_address
-          NETWORKS['testnet'], // network
-        )
-      } catch (e){
-        console.log(e);
-      }
       return encode_create_order_output(
         Amount.from_atoms(output.ask_balance.atoms.toString()), //ask_amount
         output.ask_currency.token_id || null,  // ask_token_id
@@ -711,11 +676,9 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
       );
     }
   })
-  console.log('outputsArrayItems', outputsArrayItems);
   const outputsArray = outputsArrayItems;
 
   const inputAddresses = transactionJSONrepresentation.inputs.map((input) => input.utxo.destination);
-  console.log('inputAddresses', inputAddresses);
 
   const transactionsize = estimate_transaction_size(
     mergeUint8Arrays(inputsArray),
