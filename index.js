@@ -11,8 +11,17 @@ const {
   pubkey_to_pubkeyhash_address,
   make_change_address,
   encode_create_order_output,
+  encode_outpoint_source_id,
   encode_output_transfer,
   Amount,
+  encode_input_for_utxo,
+  encode_signed_transaction,
+  encode_transaction,
+  encode_witness,
+  estimate_transaction_size,
+  SignatureHashType,
+  encode_output_token_transfer,
+  SourceId
 } = require('./mintlayer-wasm-lib/release/wasm_wrappers');
 
 // Path to the encrypted key file next to the script (default name)
@@ -231,12 +240,14 @@ program
     const accountPrivKey = make_default_account_privkey(seed, DEFAULT_NETWORK);
 
     const addresses = [];
+    const addressesPrivateKeys = {};
     const totalAddresses = 50; // Fetch 100 addresses at once
 
     for (let keyIndex = 0; keyIndex < totalAddresses; keyIndex++) {
       const receivingKey = make_receiving_address(accountPrivKey, keyIndex);
       const pk = public_key_from_private_key(receivingKey);
       const receivingAddress = pubkey_to_pubkeyhash_address(pk, DEFAULT_NETWORK);
+      addressesPrivateKeys[receivingAddress] = receivingKey;
       addresses.push(receivingAddress);
     }
 
@@ -244,6 +255,7 @@ program
       const changeKey = make_change_address(accountPrivKey, keyIndex);
       const rk = public_key_from_private_key(changeKey);
       const changeAddress = pubkey_to_pubkeyhash_address(rk, DEFAULT_NETWORK);
+      addressesPrivateKeys[changeAddress] = changeKey;
       addresses.push(changeAddress);
     }
 
@@ -328,21 +340,22 @@ program
     console.log(orderText);
 
     // Build transaction
-    const ask_amount = sellAmount;
-    const ask_token_id = sellToken.token_id || sellToken.token_details?.token_id || 'Coin';
-    const give_amount = buyAmount;
-    const give_token_id = buyTokenId || 'Coin';
+    const give_amount = sellAmount;
+    const give_token_id = sellToken.token_id || sellToken.token_details?.token_id || 'Coin';
+    const ask_amount = buyAmount;
+    const ask_token_id = buyTokenId || 'Coin';
     const conclude_address = addresses[0]; // Use the first address for simplicity
     const network = parseInt(DEFAULT_NETWORK);
 
-    const amountCoin = 0;
+    const amountCoin = 0n;
     const amountToken = BigInt(give_amount * Math.pow(10, sellToken.token_details.number_of_decimals));
 
     // step 1. Determine initial outputs
     const outputObj = [
       {
+        "type": "CreateOrder",
         "ask_balance": {
-          "atoms": ask_amount * Math.pow(10, sellToken.token_details.number_of_decimals),
+          "atoms": ask_amount * Math.pow(10, 11),
           "decimal": ask_amount
         },
         "ask_currency": {
@@ -373,9 +386,16 @@ program
 
     // step 2. Determine inputs
 
-    const sendToken = tokens.find((t) => t.token_id === ask_token_id);
+    console.log('tokens', tokens);
+    console.log('give_token_id', give_token_id);
 
-    const fee = 0.5
+    const sendToken = tokens.find((t) => t.token_id === give_token_id);
+
+    console.log('sendToken', sendToken);
+
+    console.log('amountToken', amountToken);
+
+    const fee = BigInt(0.5 * Math.pow(10, 11));
 
     const pickCoin = amountCoin + fee; // TODO more precise pick
     const inputObjCoin = selectUTXOs(utxos, pickCoin, 'Transfer', null);
@@ -423,104 +443,18 @@ program
     const transactionJSONrepresentation = {
       inputs: [
         ...inputObjCoin,
+        ...inputObjToken,
       ],
       outputs: outputObj,
     }
 
     console.log("transactionJSONrepresentation:", JSON.stringify(transactionJSONrepresentation, null, 2));
 
-    // // Binarisation
-    // // calculate fee and prepare as much transaction as possible
-    // const inputs = transactionJSONrepresentation.inputs;
-    // const transactionStrings = inputs.map((input: any) => ({
-    //   transaction: input.outpoint.source_id,
-    //   index: input.outpoint.index,
-    // }));
-    // const transactionBytes = transactionStrings.map((transaction: any) => ({
-    //   bytes: Buffer.from(transaction.transaction, 'hex'),
-    //   index: transaction.index,
-    // }));
-    // const outpointedSourceIds = transactionBytes.map((transaction: any) => ({
-    //   source_id: encode_outpoint_source_id(transaction.bytes, SourceId.Transaction),
-    //   index: transaction.index,
-    // }));
-    // const inputsIds = outpointedSourceIds.map((source: any) => (encode_input_for_utxo(source.source_id, source.index)));
-    // const inputsArray = inputsIds;
-    //
-    // const outputsArrayItems = transactionJSONrepresentation.outputs.map((output) => {
-    //   if (output.type === 'Transfer') {
-    //     return getOutputs({
-    //       amount: BigInt(output.value.amount.atoms).toString(),
-    //       address: output.destination,
-    //       networkType: network,
-    //       ...(output?.value?.token_id ? { tokenId: output.value.token_id } : {}),
-    //     })
-    //   }
-    // })
-    // const outputsArray = outputsArrayItems;
-    //
-    // const inputAddresses = transactionJSONrepresentation.inputs.map((input: any) => input.utxo.destination);
-    //
-    // const transactionsize = estimate_transaction_size(
-    //   mergeUint8Arrays(inputsArray),
-    //   inputAddresses,
-    //   mergeUint8Arrays(outputsArray),
-    //   network,
-    // );
-    //
-    // const feeRate = BigInt(Math.ceil(100000000000 / 1000));
-    //
-    //
-    // const inputsArray = transactionBINrepresentation.inputs;
-    // const outputsArray = transactionBINrepresentation.outputs;
-    // const transaction = encode_transaction(mergeUint8Arrays(inputsArray), mergeUint8Arrays(outputsArray), BigInt(0));
-    //
-    // const optUtxos_ = transactionJSONrepresentation.inputs.map((input: any) => {
-    //   if (input.utxo.type === 'Transfer') {
-    //     return getOutputs({
-    //       amount: BigInt(input.utxo.value.amount.atoms).toString(),
-    //       address: input.utxo.destination,
-    //       networkType: network,
-    //       ...(input?.utxo?.value?.token_id ? { tokenId: input.utxo.value.token_id } : {}),
-    //     })
-    //   }
-    //   if (input.utxo.type === 'LockThenTransfer') {
-    //     return getOutputs({
-    //       amount: BigInt(input.utxo.value.amount.atoms).toString(),
-    //       address: input.utxo.destination,
-    //       networkType: network,
-    //       type: 'LockThenTransfer',
-    //       lock: input.utxo.lock,
-    //       ...(input?.utxo?.value?.token_id ? { tokenId: input.utxo.value.token_id } : {}),
-    //     })
-    //   }
-    // });
-    //
-    //
-    // const optUtxos = []
-    // for (let i = 0; i < optUtxos_.length; i++) {
-    //   optUtxos.push(1)
-    //   optUtxos.push(...optUtxos_[i])
-    // }
-    //
-    // const encodedWitnesses = transactionJSONrepresentation.inputs.map((input: any, index: number) => {
-    //   const address = input.utxo.destination;
-    //   const addressPrivateKey = addressesPrivateKeys[address];
-    //   const witness = encode_witness(
-    //     SignatureHashType.ALL,
-    //     addressPrivateKey,
-    //     address,
-    //     transaction,
-    //     optUtxos,
-    //     index,
-    //     network,
-    //   );
-    //   return witness;
-    // });
-    // const encodedSignedTransaction = encode_signed_transaction(transaction, mergeUint8Arrays(encodedWitnesses));
-    // const txHash = encodedSignedTransaction.reduce((acc, byte) => acc + byte.toString(16).padStart(2, '0'), '')
+    const transactionBINrepresentation = getTransactionBINrepresentation(transactionJSONrepresentation);
 
-    const transactionHex = 'xx';
+    console.log("transactionBINrepresentation:", transactionBINrepresentation);
+
+    const transactionHex = getTransactionHEX({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys});
 
     console.log(`transactionHex:`);
     console.log(transactionHex);
@@ -716,4 +650,140 @@ const selectUTXOsForTransfer = (utxos, amount, token_id) => {
   }
 
   return utxosToSpend
+}
+
+
+function getTransactionBINrepresentation(transactionJSONrepresentation) {
+  const network = parseInt(DEFAULT_NETWORK);
+  // Binarisation
+  // calculate fee and prepare as much transaction as possible
+  const inputs = transactionJSONrepresentation.inputs;
+  console.log('inputs', inputs);
+  const transactionStrings = inputs.map((input) => ({
+    transaction: input.outpoint.source_id,
+    index: input.outpoint.index,
+  }));
+  console.log('transactionStrings', transactionStrings);
+  const transactionBytes = transactionStrings.map((transaction) => ({
+    bytes: Buffer.from(transaction.transaction, 'hex'),
+    index: transaction.index,
+  }));
+  console.log('transactionBytes', transactionBytes);
+  const outpointedSourceIds = transactionBytes.map((transaction) => ({
+    source_id: encode_outpoint_source_id(transaction.bytes, SourceId.Transaction),
+    index: transaction.index,
+  }));
+  console.log('outpointedSourceIds', outpointedSourceIds);
+  const inputsIds = outpointedSourceIds.map((source) => (encode_input_for_utxo(source.source_id, source.index)));
+  console.log('inputsIds', inputsIds);
+  const inputsArray = inputsIds;
+
+  const outputsArrayItems = transactionJSONrepresentation.outputs.map((output) => {
+    if (output.type === 'Transfer') {
+      return getOutputs({
+        amount: BigInt(output.value.amount.atoms).toString(),
+        address: output.destination,
+        networkType: network,
+        ...(output?.value?.token_id ? { tokenId: output.value.token_id } : {}),
+      })
+    }
+    if (output.type === 'CreateOrder') {
+      try{
+        console.log('output.conclude_destination', output.conclude_destination);
+        encode_create_order_output(
+          Amount.from_atoms(output.ask_balance.atoms.toString()), //ask_amount
+          output.ask_currency.token_id || null,  // ask_token_id
+          Amount.from_atoms(output.give_balance.atoms.toString()), //give_amount
+          output.give_currency.token_id || null, //give_token_id
+          output.conclude_destination, // conclude_address
+          NETWORKS['testnet'], // network
+        )
+      } catch (e){
+        console.log(e);
+      }
+      return encode_create_order_output(
+        Amount.from_atoms(output.ask_balance.atoms.toString()), //ask_amount
+        output.ask_currency.token_id || null,  // ask_token_id
+        Amount.from_atoms(output.give_balance.atoms.toString()), //give_amount
+        output.give_currency.token_id || null, //give_token_id
+        output.conclude_destination, // conclude_address
+        NETWORKS['testnet'], // network
+      );
+    }
+  })
+  console.log('outputsArrayItems', outputsArrayItems);
+  const outputsArray = outputsArrayItems;
+
+  const inputAddresses = transactionJSONrepresentation.inputs.map((input) => input.utxo.destination);
+  console.log('inputAddresses', inputAddresses);
+
+  const transactionsize = estimate_transaction_size(
+    mergeUint8Arrays(inputsArray),
+    inputAddresses,
+    mergeUint8Arrays(outputsArray),
+    network,
+  );
+
+  const feeRate = BigInt(Math.ceil(100000000000 / 1000));
+
+  return {
+    inputs: inputsArray,
+    outputs: outputsArray,
+    transactionsize,
+    feeRate,
+  }
+}
+
+function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys}) {
+  const inputsArray = transactionBINrepresentation.inputs;
+  const outputsArray = transactionBINrepresentation.outputs;
+  const transaction = encode_transaction(mergeUint8Arrays(inputsArray), mergeUint8Arrays(outputsArray), BigInt(0));
+  const network = NETWORKS['testnet'];
+
+  const optUtxos_ = transactionJSONrepresentation.inputs.map((input) => {
+    if (input.utxo.type === 'Transfer') {
+      return getOutputs({
+        amount: BigInt(input.utxo.value.amount.atoms).toString(),
+        address: input.utxo.destination,
+        networkType: network,
+        ...(input?.utxo?.value?.token_id ? { tokenId: input.utxo.value.token_id } : {}),
+      })
+    }
+    if (input.utxo.type === 'LockThenTransfer') {
+      return getOutputs({
+        amount: BigInt(input.utxo.value.amount.atoms).toString(),
+        address: input.utxo.destination,
+        networkType: network,
+        type: 'LockThenTransfer',
+        lock: input.utxo.lock,
+        ...(input?.utxo?.value?.token_id ? { tokenId: input.utxo.value.token_id } : {}),
+      })
+    }
+  });
+
+
+  const optUtxos = []
+  for (let i = 0; i < optUtxos_.length; i++) {
+    optUtxos.push(1)
+    optUtxos.push(...optUtxos_[i])
+  }
+
+  const encodedWitnesses = transactionJSONrepresentation.inputs.map((input, index) => {
+    const address = input.utxo.destination;
+    const addressPrivateKey = addressesPrivateKeys[address];
+    const witness = encode_witness(
+      SignatureHashType.ALL,
+      addressPrivateKey,
+      address,
+      transaction,
+      optUtxos,
+      index,
+      network,
+    );
+    return witness;
+  });
+  const encodedSignedTransaction = encode_signed_transaction(transaction, mergeUint8Arrays(encodedWitnesses));
+  const txHash = encodedSignedTransaction.reduce((acc, byte) => acc + byte.toString(16).padStart(2, '0'), '')
+
+  return txHash;
 }
