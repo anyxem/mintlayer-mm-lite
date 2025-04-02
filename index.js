@@ -23,6 +23,7 @@ const {
   encode_output_token_transfer,
   SourceId
 } = require('./mintlayer-wasm-lib/release/wasm_wrappers');
+const {encode_input_for_conclude_order} = require("./mintlayer-wasm-lib/release");
 
 // Path to the encrypted key file next to the script (default name)
 const DEFAULT_WALLET_NAME = 'encrypted_wallet_key';
@@ -476,13 +477,197 @@ program
   });
 
 program
-  .command('cancel-order')
-  .description('Cancel an order')
+  .command('conclude-order')
+  .description('Conclude an order')
   .action(async () => {
+    const WALLET_API = 'https://api.mintini.app';
+    const ORDER_API = 'https://api-server-lovelace.mintlayer.org/api/v2';
     const password = await getPassword(program.opts());
-    const key = loadKey(password, path.join(__dirname, `${DEFAULT_WALLET_NAME}${KEY_FILE_EXT}`));
-    console.log('Canceling order with key:', key);
-    // Your order cancellation logic goes here
+    const seed = loadKey(password, path.join(__dirname, `${DEFAULT_WALLET_NAME}${KEY_FILE_EXT}`));
+    const accountPrivKey = make_default_account_privkey(seed, DEFAULT_NETWORK);
+
+    const addresses = [];
+    const addressesPrivateKeys = {};
+    const totalAddresses = 50; // Fetch 100 addresses at once
+
+    for (let keyIndex = 0; keyIndex < totalAddresses; keyIndex++) {
+      const receivingKey = make_receiving_address(accountPrivKey, keyIndex);
+      const pk = public_key_from_private_key(receivingKey);
+      const receivingAddress = pubkey_to_pubkeyhash_address(pk, DEFAULT_NETWORK);
+      addressesPrivateKeys[receivingAddress] = receivingKey;
+      addresses.push(receivingAddress);
+    }
+
+    for (let keyIndex = 0; keyIndex < totalAddresses; keyIndex++) {
+      const changeKey = make_change_address(accountPrivKey, keyIndex);
+      const rk = public_key_from_private_key(changeKey);
+      const changeAddress = pubkey_to_pubkeyhash_address(rk, DEFAULT_NETWORK);
+      addressesPrivateKeys[changeAddress] = changeKey;
+      addresses.push(changeAddress);
+    }
+
+    // Fetch balances from the API
+    const response = await fetch(WALLET_API + '/account', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ addresses, network: parseInt(DEFAULT_NETWORK) })
+    });
+
+    if (!response.ok) {
+      console.error('Failed to fetch balances:', response.statusText);
+      rl.close();
+      return;
+    }
+
+    const data = await response.json();
+
+    const utxos = data.utxos;
+
+    // Prompt for order_id
+    const orderId = await promptUser('Enter the order ID to conclude: ');
+    if (!orderId.trim()) {
+      console.log('Order ID cannot be empty. Aborting...');
+      rl.close();
+      return;
+    }
+
+    // Fetch order details
+    const orderResponse = await fetch(`${ORDER_API}/order/${orderId}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!orderResponse.ok) {
+      console.error('Failed to fetch order details:', orderResponse.statusText);
+      rl.close();
+      return;
+    }
+
+    const orderData = await orderResponse.json();
+    // Display order details
+    console.log('\nOrder Details:');
+    console.log(`Order ID: ${orderData.order_id}`);
+    console.log(`Sell: ${orderData.give_balance.decimal} ${orderData.give_currency.token_id ? orderData.give_currency.token_id : orderData.give_currency.type}`);
+    console.log(`Buy: ${orderData.ask_balance.decimal} ${orderData.ask_currency.type === 'Coin' ? 'ML' : orderData.ask_currency.token_id || 'Unknown'}`);
+    console.log(`Conclude Destination: ${orderData.conclude_destination}`);
+
+    // Confirm action
+    const confirm = await promptUser(`Are you sure you want to conclude order ${orderId}? (Y/n): `);
+    if (confirm.toLowerCase() !== 'y') {
+      console.log('Action cancelled.');
+      rl.close();
+      return;
+    }
+
+    const inputObj = [{
+      type: "ConcludeOrder",
+      destination: orderData.conclude_destination,
+      order_id: orderData.order_id,
+      nonce: orderData.nonce,
+    }];
+
+    const outputObj = [];
+
+    // output Give
+    outputObj.push({
+      type: 'Transfer',
+      value: {
+        type: orderData.give_currency.type === 'Token' ? 'TokenV1' : 'Coin',
+        ...(orderData.give_currency.type === 'Token' ? {token_id: orderData.give_currency.token_id} : {}),
+        amount: {
+          atoms: orderData.give_balance.atoms,
+          decimal: orderData.give_balance.decimal,
+        },
+      },
+      destination: orderData.conclude_destination,
+    });
+
+    // output Ask
+    outputObj.push({
+      type: 'Transfer',
+      value: {
+        type: orderData.ask_currency.type === 'Token' ? 'TokenV1' : 'Coin',
+        ...(orderData.ask_currency.type === 'Token' ? {token_id: orderData.ask_currency.token_id} : {}),
+        amount: {
+          atoms: orderData.ask_balance.atoms,
+          decimal: orderData.ask_balance.decimal,
+        },
+      },
+      destination: orderData.conclude_destination,
+    });
+
+
+    const amountCoin = 0n;
+    const fee = BigInt(0.5 * Math.pow(10, 11)); // TODO
+
+    const pickCoin = amountCoin + fee; // TODO more precise pick
+    const inputObjCoin = selectUTXOs(utxos, pickCoin, 'Transfer', null);
+
+    // step 3. Calculate total input value
+    const totalInputValueCoin = inputObjCoin.reduce((acc, item) => acc + BigInt(item.utxo.value.amount.atoms), 0n);
+
+    inputObj.push(...inputObjCoin);
+
+    const changeAmountCoin = totalInputValueCoin - amountCoin - fee;
+
+    // step 4. Add change if necessary
+    if (changeAmountCoin > 0) {
+      outputObj.push({
+        type: 'Transfer',
+        value: {
+          type: 'Coin',
+          amount: {
+            atoms: changeAmountCoin.toString(),
+            decimal: (changeAmountCoin.toString() / 1e11).toString(),
+          },
+        },
+        destination: addresses[0], // change address
+      });
+    }
+
+
+    const transactionJSONrepresentation = {
+      inputs: inputObj,
+      outputs: outputObj,
+    }
+
+    console.log("transactionJSONrepresentation:", JSON.stringify(transactionJSONrepresentation, null, 2));
+
+    const transactionBINrepresentation = getTransactionBINrepresentation(transactionJSONrepresentation);
+
+    console.log('transactionBINrepresentation', transactionBINrepresentation);
+
+    const transactionHex = getTransactionHEX({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys});
+
+    console.log('transactionHex');
+    console.log(transactionHex);
+
+    const confirm_broadcast = await promptUser(`Broadcast transaction? (Y/n): `);
+    if (confirm_broadcast.toLowerCase() !== 'y') {
+      console.log('Action cancelled.');
+      rl.close();
+      return;
+    }
+
+    // Send request to conclude the order
+    const concludeResponse = await fetch(`${ORDER_API}/transaction`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: transactionHex
+    });
+
+    if (concludeResponse.ok) {
+      console.log(`Order ${orderId} concluded successfully.`);
+    } else {
+      console.error('Failed to conclude order:', concludeResponse.statusText);
+    }
+
     rl.close();
   });
 
@@ -641,7 +826,7 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
   // Binarisation
   // calculate fee and prepare as much transaction as possible
   const inputs = transactionJSONrepresentation.inputs;
-  const transactionStrings = inputs.map((input) => ({
+  const transactionStrings = inputs.filter((input) => input.type !== 'ConcludeOrder').map((input) => ({
     transaction: input.outpoint.source_id,
     index: input.outpoint.index,
   }));
@@ -678,7 +863,7 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
   })
   const outputsArray = outputsArrayItems;
 
-  const inputAddresses = transactionJSONrepresentation.inputs.map((input) => input.utxo.destination);
+  const inputAddresses = transactionJSONrepresentation.inputs.map((input) => input?.utxo?.destination || input?.destination);
 
   const transactionsize = estimate_transaction_size(
     mergeUint8Arrays(inputsArray),
@@ -704,6 +889,13 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
   const network = NETWORKS['testnet'];
 
   const optUtxos_ = transactionJSONrepresentation.inputs.map((input) => {
+    if (input.type === 'ConcludeOrder') {
+      return encode_input_for_conclude_order(
+        input.order_id,
+        input.nonce.toString(),
+        network,
+      );
+    }
     if (input.utxo.type === 'Transfer') {
       return getOutputs({
         amount: BigInt(input.utxo.value.amount.atoms).toString(),
@@ -727,13 +919,39 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
 
   const optUtxos = []
   for (let i = 0; i < optUtxos_.length; i++) {
-    optUtxos.push(1)
-    optUtxos.push(...optUtxos_[i])
+    if(transactionJSONrepresentation.inputs[i].type === 'ConcludeOrder') {
+      optUtxos.push(0);
+      continue;
+    } else {
+      optUtxos.push(1)
+      optUtxos.push(...optUtxos_[i])
+      continue;
+    }
   }
 
   const encodedWitnesses = transactionJSONrepresentation.inputs.map((input, index) => {
-    const address = input.utxo.destination;
+    const address = input?.utxo?.destination || input.destination;
     const addressPrivateKey = addressesPrivateKeys[address];
+    try {
+      console.log(SignatureHashType.ALL,
+        addressPrivateKey,
+        address,
+        transaction,
+        optUtxos,
+        index,
+        network,);
+      encode_witness(
+        SignatureHashType.ALL,
+        addressPrivateKey,
+        address,
+        transaction,
+        optUtxos,
+        index,
+        network,
+      )
+    } catch (e) {
+      console.log(e); // TODO error here Invalid Transaction witness encoding
+    }
     const witness = encode_witness(
       SignatureHashType.ALL,
       addressPrivateKey,
@@ -745,6 +963,7 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
     );
     return witness;
   });
+  console.log('encodedWitnesses', encodedWitnesses);
   const encodedSignedTransaction = encode_signed_transaction(transaction, mergeUint8Arrays(encodedWitnesses));
   const txHash = encodedSignedTransaction.reduce((acc, byte) => acc + byte.toString(16).padStart(2, '0'), '')
 
