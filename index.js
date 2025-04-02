@@ -384,14 +384,7 @@ program
 
     // step 2. Determine inputs
 
-    console.log('tokens', tokens);
-    console.log('give_token_id', give_token_id);
-
     const sendToken = tokens.find((t) => t.token_id === give_token_id);
-
-    console.log('sendToken', sendToken);
-
-    console.log('amountToken', amountToken);
 
     const fee = BigInt(0.5 * Math.pow(10, 11));
 
@@ -934,27 +927,10 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
     }
   }
 
-  console.log('optUtxos', optUtxos);
-
   const encodedWitnesses = transactionJSONrepresentation.inputs.map((input, index) => {
     const address = input?.utxo?.destination || input.destination;
     const addressPrivateKey = addressesPrivateKeys[address];
-    console.log('address', address);
-    console.log('addressPrivateKey', addressPrivateKey);
-    try {
-      encode_witness(
-        SignatureHashType.ALL,
-        addressPrivateKey,
-        address,
-        transaction,
-        optUtxos,
-        index,
-        network,
-      )
-    } catch (e) {
-      console.log('Error witness');
-      console.log(e); // TODO error here Invalid Transaction witness encoding
-    }
+
     const witness = encode_witness(
       SignatureHashType.ALL,
       addressPrivateKey,
@@ -966,7 +942,6 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
     );
     return witness;
   });
-  console.log('encodedWitnesses', encodedWitnesses);
   const encodedSignedTransaction = encode_signed_transaction(transaction, mergeUint8Arrays(encodedWitnesses));
   const txHash = encodedSignedTransaction.reduce((acc, byte) => acc + byte.toString(16).padStart(2, '0'), '')
 
