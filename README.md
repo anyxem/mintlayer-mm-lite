@@ -7,7 +7,7 @@ This is a console-based tool built with Node.js for creating and managing token 
 - **Show Addresses**: Display up to 100 derived addresses in a table.
 - **Show Balance**: Fetch and display token balances from the API.
 - **Create Order**: Create a sell/buy order with confirmation and optional broadcasting.
-- In progress **Cancel Order**: Cancel an existing order by providing the order ID.
+- **Conclude Order**: Close an existing order by providing the order ID and getting the remain tokens.
 
 ## Prerequisites
 - [Node.js](https://nodejs.org/) (v18 or higher recommended)
