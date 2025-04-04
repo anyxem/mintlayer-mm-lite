@@ -354,7 +354,7 @@ program
     }
 
     // Calculate ratio
-    const ratio = sellAmount / buyAmount;
+    const ratio = buyAmount / sellAmount;
 
     // Show order details and confirm
     console.log('\nOrder Details:');
@@ -473,13 +473,7 @@ program
 
     console.log('transactionJSONrepresentation', transactionJSONrepresentation);
 
-    console.log('network', network);
-    console.log('NETWORKS[network]', NETWORKS[network]);
-
     const transactionBINrepresentation = getTransactionBINrepresentation(transactionJSONrepresentation, NETWORKS[network]);
-
-    console.log('transactionBINrepresentation', transactionBINrepresentation);
-    console.log('NETWORKS[network]', NETWORKS[network]);
 
     const transactionHex = getTransactionHEX({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys}, NETWORKS[network]);
 
@@ -557,6 +551,37 @@ program
     }
 
     const data = await response.json();
+
+    const tokens = data.tokens;
+
+    // Fetch orders from the API
+    const responseOrder = await fetch(ORDER_API + '/order', {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+    });
+
+    if (!responseOrder.ok) {
+      console.error('Failed to fetch orders:', responseOrder.statusText);
+      rl.close();
+      return;
+    }
+
+    const dataOrders = await responseOrder.json();
+
+    // Display current balances
+    console.log('Your Orders:');
+    const orderTable = dataOrders
+      .filter(({conclude_destination}) => addresses.includes(conclude_destination))
+      .filter(({ask_balance, give_balance}) => ask_balance.atoms > 0 && give_balance.atoms > 0)
+      .map((order, idx) => ({
+        Index: idx,
+        OrderId: order.order_id,
+        give: (order.give_balance.decimal < 1 ? "!!" : "") + order.give_balance.decimal + ' ' + (order.give_currency.token_id ? tokens.find(({token_id}) => token_id === order.give_currency.token_id ).symbol : order.give_currency.type),
+        ask: order.initially_asked.decimal - order.ask_balance.decimal + ' ' + (order.ask_currency.token_id ? order.ask_currency.token_id : order.ask_currency.type),
+      }));
+    console.table(orderTable);
 
     const utxos = data.utxos;
 
@@ -673,8 +698,6 @@ program
     console.log("transactionJSONrepresentation:", JSON.stringify(transactionJSONrepresentation, null, 2));
 
     const transactionBINrepresentation = getTransactionBINrepresentation(transactionJSONrepresentation, NETWORKS[network]);
-
-    console.log('transactionBINrepresentation', transactionBINrepresentation);
 
     const transactionHex = getTransactionHEX({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys}, NETWORKS[network]);
 
@@ -926,8 +949,6 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
   const outputsArray = transactionBINrepresentation.outputs;
   const transaction = encode_transaction(mergeUint8Arrays(inputsArray), mergeUint8Arrays(outputsArray), BigInt(0));
 
-  console.log('transaction', transaction);
-
   const optUtxos_ = transactionJSONrepresentation.inputs.map((input) => {
     if (!input.utxo) {
       return 0;
@@ -951,9 +972,6 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
       })
     }
   });
-
-
-  console.log('optUtxos_', optUtxos_);
 
   const optUtxos = [];
   for (let i = 0; i < optUtxos_.length; i++) {
@@ -982,8 +1000,6 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
     );
     return witness;
   });
-
-  console.log('encodedWitnesses', encodedWitnesses);
 
   const encodedSignedTransaction = encode_signed_transaction(transaction, mergeUint8Arrays(encodedWitnesses));
   const txHash = encodedSignedTransaction.reduce((acc, byte) => acc + byte.toString(16).padStart(2, '0'), '')
