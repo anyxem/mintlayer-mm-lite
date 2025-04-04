@@ -628,8 +628,8 @@ program
         type: orderData.ask_currency.type === 'Token' ? 'TokenV1' : 'Coin',
         ...(orderData.ask_currency.type === 'Token' ? {token_id: orderData.ask_currency.token_id} : {}),
         amount: {
-          atoms: (orderData.ask_balance.atoms - orderData.initially_asked.atoms).toString(),
-          decimal: (orderData.ask_balance.decimal - orderData.initially_asked.decimal).toString(),
+          atoms: (orderData.initially_asked.atoms - orderData.ask_balance.atoms).toString(),
+          decimal: (orderData.initially_asked.decimal - orderData.ask_balance.decimal).toString(),
         },
       },
       destination: orderData.conclude_destination,
