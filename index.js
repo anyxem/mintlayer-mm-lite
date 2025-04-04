@@ -25,11 +25,18 @@ const {
 } = require('./mintlayer-wasm-lib/release/wasm_wrappers');
 const {encode_input_for_conclude_order} = require("./mintlayer-wasm-lib/release");
 
-// Path to the encrypted key file next to the script (default name)
+// Default values
 const DEFAULT_WALLET_NAME = 'encrypted_wallet_key';
 const KEY_FILE_EXT = '.bin';
+const DEFAULT_NETWORK = 'testnet'; // Default to testnet
 
-const DEFAULT_NETWORK = "1" // testnet
+// Network mapping
+const NETWORKS = {
+  mainnet: 0,
+  testnet: 1,
+  regtest: 2,
+  signet: 3,
+};
 
 // Create readline interface for user input
 const rl = readline.createInterface({
@@ -58,13 +65,13 @@ function decryptKey(encryptedData, password) {
   return decrypted;
 }
 
-// Load the key at startup
+// Load the key from a specified file
 function loadKey(password, filePath) {
   if (fs.existsSync(filePath)) {
     const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     return decryptKey(data, password);
   } else {
-    console.log('Key not found. Create a wallet using the "create-wallet" command.');
+    console.log(`Key file "${filePath}" not found. Create it using the "create-wallet" command.`);
     process.exit(1);
   }
 }
@@ -86,7 +93,36 @@ async function getPassword(commandOpts) {
   return promptUser('Enter password: ');
 }
 
-// Get unique file path for the wallet
+// Get network (from argument or prompt)
+async function getNetwork(commandOpts) {
+  if (commandOpts.network) {
+    const network = commandOpts.network.toLowerCase();
+    if (NETWORKS[network] !== undefined) {
+      return network;
+    } else {
+      console.log(`Invalid network "${network}". Use "testnet" or "mainnet". Defaulting to "${DEFAULT_NETWORK}".`);
+    }
+  }
+  const networkInput = await promptUser(`Enter network (testnet/mainnet, default: ${DEFAULT_NETWORK}): `);
+  const network = networkInput.trim().toLowerCase() || DEFAULT_NETWORK;
+  if (NETWORKS[network] === undefined) {
+    console.log(`Invalid network "${network}". Using default "${DEFAULT_NETWORK}".`);
+    return DEFAULT_NETWORK;
+  }
+  return network;
+}
+
+// Get wallet file path (from argument or prompt)
+async function getWalletFilePath(commandOpts, defaultName = DEFAULT_WALLET_NAME) {
+  if (commandOpts.file) {
+    return path.join(__dirname, `${commandOpts.file}${KEY_FILE_EXT}`);
+  }
+  const fileInput = await promptUser(`Enter wallet file name (default: ${defaultName}): `);
+  const fileName = fileInput.trim() || defaultName;
+  return path.join(__dirname, `${fileName}${KEY_FILE_EXT}`);
+}
+
+// Get unique file path for wallet creation
 function getUniqueFilePath(walletName) {
   let baseName = walletName || DEFAULT_WALLET_NAME;
   let filePath = path.join(__dirname, `${baseName}${KEY_FILE_EXT}`);
@@ -96,14 +132,15 @@ function getUniqueFilePath(walletName) {
     filePath = path.join(__dirname, `${baseName}_${counter}${KEY_FILE_EXT}`);
     counter++;
   }
-
   return filePath;
 }
 
 // Configure commands using commander
 program
   .version('1.0.0')
-  .option('-p, --password <password>', 'Password to decrypt the key');
+  .option('-p, --password <password>', 'Password to decrypt the key')
+  .option('-n, --network <network>', 'Network to use (testnet or mainnet)')
+  .option('-f, --file <filename>', 'Wallet file name (without .bin extension)');
 
 program
   .command('create-wallet')
@@ -113,23 +150,19 @@ program
 
     // Get password
     const password = await getPassword(program.opts());
-
-    // Prompt for seed phrase (mandatory)
+    const network = await getNetwork(program.opts());
     const seedPhrase = await promptUser('Enter seed phrase (mandatory): ');
     if (!seedPhrase.trim()) {
       console.log('Seed phrase cannot be empty. Aborting...');
       rl.close();
       return;
     }
-
-    // Prompt for wallet name (optional)
-    const walletName = await promptUser('Enter wallet name (press Enter for default): ');
+    const walletName = await promptUser(`Enter wallet file name (default: ${DEFAULT_WALLET_NAME}): `);
     const filePath = getUniqueFilePath(walletName.trim());
 
-    // Encrypt and save the seed phrase
     const encrypted = encryptKey(seedPhrase, password);
     fs.writeFileSync(filePath, JSON.stringify(encrypted));
-    console.log('Wallet created, key saved to', filePath);
+    console.log(`Wallet created for ${network}, key saved to`, filePath);
 
     rl.close();
   });
@@ -139,24 +172,26 @@ program
   .description('Show wallet addresses')
   .action(async () => {
     const password = await getPassword(program.opts());
-    const seed = loadKey(password, path.join(__dirname, `${DEFAULT_WALLET_NAME}${KEY_FILE_EXT}`));
-    const accountPrivKey = make_default_account_privkey(seed, DEFAULT_NETWORK);
+    const network = await getNetwork(program.opts());
+    const filePath = await getWalletFilePath(program.opts());
+    const seed = loadKey(password, filePath);
+    const accountPrivKey = make_default_account_privkey(seed, NETWORKS[network]);
 
     let keyIndex = 0;
     const batchSize = 10;
 
     async function showNextBatch() {
       const addresses = [];
-      for (let i = 0; i < batchSize && keyIndex < 100; i++, keyIndex++) { // Arbitrary limit of 100, adjust as needed
+      for (let i = 0; i < batchSize && keyIndex < 100; i++, keyIndex++) {
         const receivingKey = make_receiving_address(accountPrivKey, keyIndex);
         const pk = public_key_from_private_key(receivingKey);
-        const receivingAddress = pubkey_to_pubkeyhash_address(pk, DEFAULT_NETWORK);
+        const receivingAddress = pubkey_to_pubkeyhash_address(pk, NETWORKS[network]);
         addresses.push({ Index: keyIndex, Address: receivingAddress });
       }
 
       console.table(addresses);
 
-      if (keyIndex < 100) { // Continue if there are more to show
+      if (keyIndex < 100) {
         const response = await promptUser('Press "c" to show more addresses or any key to exit: ');
         if (response.toLowerCase() === 'c') {
           await showNextBatch();
@@ -179,33 +214,34 @@ program
   .action(async () => {
     const WALLET_API = 'https://api.mintini.app';
     const password = await getPassword(program.opts());
-    const seed = loadKey(password, path.join(__dirname, `${DEFAULT_WALLET_NAME}${KEY_FILE_EXT}`));
-    const accountPrivKey = make_default_account_privkey(seed, DEFAULT_NETWORK);
+    const network = await getNetwork(program.opts());
+    const filePath = await getWalletFilePath(program.opts());
+    const seed = loadKey(password, filePath);
+    const accountPrivKey = make_default_account_privkey(seed, NETWORKS[network]);
 
     const addresses = [];
-    const totalAddresses = 50; // Fetch 100 addresses at once
+    const totalAddresses = 50;
 
     for (let keyIndex = 0; keyIndex < totalAddresses; keyIndex++) {
       const receivingKey = make_receiving_address(accountPrivKey, keyIndex);
       const pk = public_key_from_private_key(receivingKey);
-      const receivingAddress = pubkey_to_pubkeyhash_address(pk, DEFAULT_NETWORK);
+      const receivingAddress = pubkey_to_pubkeyhash_address(pk, NETWORKS[network]);
       addresses.push(receivingAddress);
     }
 
     for (let keyIndex = 0; keyIndex < totalAddresses; keyIndex++) {
       const changeKey = make_change_address(accountPrivKey, keyIndex);
       const rk = public_key_from_private_key(changeKey);
-      const changeAddress = pubkey_to_pubkeyhash_address(rk, DEFAULT_NETWORK);
+      const changeAddress = pubkey_to_pubkeyhash_address(rk, NETWORKS[network]);
       addresses.push(changeAddress);
     }
 
-    // Fetch balances from the API
     const response = await fetch(WALLET_API + '/account', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ addresses, network: parseInt(DEFAULT_NETWORK) })
+      body: JSON.stringify({ addresses, network: NETWORKS[network] })
     });
 
     if (!response.ok) {
@@ -215,19 +251,14 @@ program
     }
 
     const data = await response.json();
-
     const tokenTable = data.tokens.map((token, idx) => ({
-      // Index: idx,
       Symbol: token.symbol,
       Balance: token.balance,
-      // Value: token.value,
       Type: token.type,
-      // Ticker: token.symbol || 'N/A',
       'Token ID': token.token_id || token.token_details?.token_id || 'N/A'
     }));
 
     console.table(tokenTable);
-
     rl.close();
   });
 
@@ -237,17 +268,19 @@ program
   .action(async () => {
     const WALLET_API = 'https://api.mintini.app';
     const password = await getPassword(program.opts());
-    const seed = loadKey(password, path.join(__dirname, `${DEFAULT_WALLET_NAME}${KEY_FILE_EXT}`));
-    const accountPrivKey = make_default_account_privkey(seed, DEFAULT_NETWORK);
+    const network = await getNetwork(program.opts());
+    const filePath = await getWalletFilePath(program.opts());
+    const seed = loadKey(password, filePath);
+    const accountPrivKey = make_default_account_privkey(seed, NETWORKS[network]);
 
     const addresses = [];
     const addressesPrivateKeys = {};
-    const totalAddresses = 50; // Fetch 100 addresses at once
+    const totalAddresses = 50;
 
     for (let keyIndex = 0; keyIndex < totalAddresses; keyIndex++) {
       const receivingKey = make_receiving_address(accountPrivKey, keyIndex);
       const pk = public_key_from_private_key(receivingKey);
-      const receivingAddress = pubkey_to_pubkeyhash_address(pk, DEFAULT_NETWORK);
+      const receivingAddress = pubkey_to_pubkeyhash_address(pk, NETWORKS[network]);
       addressesPrivateKeys[receivingAddress] = receivingKey;
       addresses.push(receivingAddress);
     }
@@ -255,7 +288,7 @@ program
     for (let keyIndex = 0; keyIndex < totalAddresses; keyIndex++) {
       const changeKey = make_change_address(accountPrivKey, keyIndex);
       const rk = public_key_from_private_key(changeKey);
-      const changeAddress = pubkey_to_pubkeyhash_address(rk, DEFAULT_NETWORK);
+      const changeAddress = pubkey_to_pubkeyhash_address(rk, NETWORKS[network]);
       addressesPrivateKeys[changeAddress] = changeKey;
       addresses.push(changeAddress);
     }
@@ -266,7 +299,7 @@ program
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ addresses, network: parseInt(DEFAULT_NETWORK) })
+      body: JSON.stringify({ addresses, network: NETWORKS[network] })
     });
 
     if (!response.ok) {
@@ -346,7 +379,6 @@ program
     const ask_amount = buyAmount;
     const ask_token_id = buyTokenId || 'Coin';
     const conclude_address = addresses[0]; // Use the first address for simplicity
-    const network = parseInt(DEFAULT_NETWORK);
 
     const amountCoin = 0n;
     const amountToken = BigInt(give_amount * Math.pow(10, sellToken.token_details.number_of_decimals));
@@ -439,9 +471,17 @@ program
       outputs: outputObj,
     }
 
-    const transactionBINrepresentation = getTransactionBINrepresentation(transactionJSONrepresentation);
+    console.log('transactionJSONrepresentation', transactionJSONrepresentation);
 
-    const transactionHex = getTransactionHEX({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys});
+    console.log('network', network);
+    console.log('NETWORKS[network]', NETWORKS[network]);
+
+    const transactionBINrepresentation = getTransactionBINrepresentation(transactionJSONrepresentation, NETWORKS[network]);
+
+    console.log('transactionBINrepresentation', transactionBINrepresentation);
+    console.log('NETWORKS[network]', NETWORKS[network]);
+
+    const transactionHex = getTransactionHEX({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys}, NETWORKS[network]);
 
     console.log(`transactionHex:`);
     console.log(transactionHex);
@@ -476,17 +516,19 @@ program
     const WALLET_API = 'https://api.mintini.app';
     const ORDER_API = 'https://api-server-lovelace.mintlayer.org/api/v2';
     const password = await getPassword(program.opts());
-    const seed = loadKey(password, path.join(__dirname, `${DEFAULT_WALLET_NAME}${KEY_FILE_EXT}`));
-    const accountPrivKey = make_default_account_privkey(seed, DEFAULT_NETWORK);
+    const network = await getNetwork(program.opts());
+    const filePath = await getWalletFilePath(program.opts());
+    const seed = loadKey(password, filePath);
+    const accountPrivKey = make_default_account_privkey(seed, NETWORKS[network]);
 
     const addresses = [];
     const addressesPrivateKeys = {};
-    const totalAddresses = 50; // Fetch 100 addresses at once
+    const totalAddresses = 50;
 
     for (let keyIndex = 0; keyIndex < totalAddresses; keyIndex++) {
       const receivingKey = make_receiving_address(accountPrivKey, keyIndex);
       const pk = public_key_from_private_key(receivingKey);
-      const receivingAddress = pubkey_to_pubkeyhash_address(pk, DEFAULT_NETWORK);
+      const receivingAddress = pubkey_to_pubkeyhash_address(pk, NETWORKS[network]);
       addressesPrivateKeys[receivingAddress] = receivingKey;
       addresses.push(receivingAddress);
     }
@@ -494,7 +536,7 @@ program
     for (let keyIndex = 0; keyIndex < totalAddresses; keyIndex++) {
       const changeKey = make_change_address(accountPrivKey, keyIndex);
       const rk = public_key_from_private_key(changeKey);
-      const changeAddress = pubkey_to_pubkeyhash_address(rk, DEFAULT_NETWORK);
+      const changeAddress = pubkey_to_pubkeyhash_address(rk, NETWORKS[network]);
       addressesPrivateKeys[changeAddress] = changeKey;
       addresses.push(changeAddress);
     }
@@ -505,7 +547,7 @@ program
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ addresses, network: parseInt(DEFAULT_NETWORK) })
+      body: JSON.stringify({ addresses, network: NETWORKS[network] })
     });
 
     if (!response.ok) {
@@ -630,11 +672,11 @@ program
 
     console.log("transactionJSONrepresentation:", JSON.stringify(transactionJSONrepresentation, null, 2));
 
-    const transactionBINrepresentation = getTransactionBINrepresentation(transactionJSONrepresentation);
+    const transactionBINrepresentation = getTransactionBINrepresentation(transactionJSONrepresentation, NETWORKS[network]);
 
     console.log('transactionBINrepresentation', transactionBINrepresentation);
 
-    const transactionHex = getTransactionHEX({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys});
+    const transactionHex = getTransactionHEX({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys}, NETWORKS[network]);
 
     console.log('transactionHex');
     console.log(transactionHex);
@@ -650,7 +692,7 @@ program
     const concludeResponse = await fetch(`${ORDER_API}/transaction`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'text/plain'
       },
       body: transactionHex
     });
@@ -693,17 +735,10 @@ function mergeUint8Arrays(arrays) {
   return result;
 }
 
-const NETWORKS = {
-  mainnet: 0,
-  testnet: 1,
-  regtest: 2,
-  signet: 3,
-}
-
 const getOutputs = ({
                       amount,
                       address,
-                      networkType,
+                      network,
                       type = 'Transfer',
                       lock,
                       chainTip,
@@ -715,7 +750,8 @@ const getOutputs = ({
     throw new Error('LockThenTransfer requires a lock')
   }
 
-  const networkIndex = networkType
+  console.log('network', network);
+
   if (type === 'Transfer') {
     const amountInstace = Amount.from_atoms(amount);
     if (tokenId) {
@@ -723,10 +759,10 @@ const getOutputs = ({
         amountInstace,
         address,
         tokenId,
-        networkIndex,
+        network,
       )
     } else {
-      return encode_output_transfer(amountInstace, address, networkIndex)
+      return encode_output_transfer(amountInstace, address, network)
     }
   }
   if (type === 'LockThenTransfer') {
@@ -737,7 +773,7 @@ const getOutputs = ({
         amountInstance,
         address,
         lockEncoded,
-        networkIndex,
+        network,
       )
     }
     if (lock.type === 'ForBlockCount' && !chainTip) {
@@ -746,26 +782,26 @@ const getOutputs = ({
         amountInstance,
         address,
         lockEncoded,
-        networkIndex,
+        network,
       )
     }
     if (lock.type === 'ForBlockCount' && chainTip) {
-      const stakingMaturity = staking_pool_spend_maturity_block_count(chainTip.toString(), networkIndex);
+      const stakingMaturity = staking_pool_spend_maturity_block_count(chainTip.toString(), network);
       const lockEncoded = encode_lock_for_block_count(stakingMaturity);
       return encode_output_lock_then_transfer(
         amountInstance,
         address,
         lockEncoded,
-        networkIndex,
+        network,
       )
     }
   }
   if(type === 'CreateDelegationId') {
-    return encode_output_create_delegation(poolId, address, networkIndex)
+    return encode_output_create_delegation(poolId, address, network)
   }
   if(type === 'DelegateStaking') {
     const amountInstace = Amount.from_atoms(amount);
-    return encode_output_delegate_staking(amountInstace, delegation_id, networkIndex)
+    return encode_output_delegate_staking(amountInstace, delegation_id, network)
   }
 }
 
@@ -814,8 +850,8 @@ const selectUTXOsForTransfer = (utxos, amount, token_id) => {
 }
 
 
-function getTransactionBINrepresentation(transactionJSONrepresentation) {
-  const network = parseInt(DEFAULT_NETWORK);
+function getTransactionBINrepresentation(transactionJSONrepresentation, _network) {
+  const network = _network;
   // Binarisation
   // calculate fee and prepare as much transaction as possible
   const inputs = transactionJSONrepresentation.inputs;
@@ -848,7 +884,7 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
       return getOutputs({
         amount: BigInt(output.value.amount.atoms).toString(),
         address: output.destination,
-        networkType: network,
+        network,
         ...(output?.value?.token_id ? { tokenId: output.value.token_id } : {}),
       })
     }
@@ -859,7 +895,7 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
         Amount.from_atoms(output.give_balance.atoms.toString()), //give_amount
         output.give_currency.token_id || null, //give_token_id
         output.conclude_destination, // conclude_address
-        NETWORKS['testnet'], // network
+        network, // network
       );
     }
   })
@@ -884,11 +920,13 @@ function getTransactionBINrepresentation(transactionJSONrepresentation) {
   }
 }
 
-function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys}) {
+function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepresentation, addressesPrivateKeys}, _network) {
+  const network = _network;
   const inputsArray = transactionBINrepresentation.inputs;
   const outputsArray = transactionBINrepresentation.outputs;
   const transaction = encode_transaction(mergeUint8Arrays(inputsArray), mergeUint8Arrays(outputsArray), BigInt(0));
-  const network = NETWORKS['testnet'];
+
+  console.log('transaction', transaction);
 
   const optUtxos_ = transactionJSONrepresentation.inputs.map((input) => {
     if (!input.utxo) {
@@ -898,7 +936,7 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
       return getOutputs({
         amount: BigInt(input.utxo.value.amount.atoms).toString(),
         address: input.utxo.destination,
-        networkType: network,
+        network,
         ...(input?.utxo?.value?.token_id ? { tokenId: input.utxo.value.token_id } : {}),
       })
     }
@@ -906,7 +944,7 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
       return getOutputs({
         amount: BigInt(input.utxo.value.amount.atoms).toString(),
         address: input.utxo.destination,
-        networkType: network,
+        network,
         type: 'LockThenTransfer',
         lock: input.utxo.lock,
         ...(input?.utxo?.value?.token_id ? { tokenId: input.utxo.value.token_id } : {}),
@@ -914,6 +952,8 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
     }
   });
 
+
+  console.log('optUtxos_', optUtxos_);
 
   const optUtxos = [];
   for (let i = 0; i < optUtxos_.length; i++) {
@@ -942,6 +982,9 @@ function getTransactionHEX ({transactionBINrepresentation, transactionJSONrepres
     );
     return witness;
   });
+
+  console.log('encodedWitnesses', encodedWitnesses);
+
   const encodedSignedTransaction = encode_signed_transaction(transaction, mergeUint8Arrays(encodedWitnesses));
   const txHash = encodedSignedTransaction.reduce((acc, byte) => acc + byte.toString(16).padStart(2, '0'), '')
 
