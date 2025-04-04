@@ -773,8 +773,6 @@ const getOutputs = ({
     throw new Error('LockThenTransfer requires a lock')
   }
 
-  console.log('network', network);
-
   if (type === 'Transfer') {
     const amountInstace = Amount.from_atoms(amount);
     if (tokenId) {
